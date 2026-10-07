@@ -34,7 +34,8 @@ env_file <- file.path(
   project_dir, "environmental_layers", "selected_environmental_stack.tif"
 )
 occ_file <- file.path(
-  project_dir, "Species", "Book1.csv"
+  "D:/Tushar/Research_Papers/Animal_Corridor_Pandu_da",
+  "Species", "Book1.csv"
 )
 study_area_file <- file.path(
   "D:/Tushar/Research_Papers/Animal_Corridor_Pandu_da",
@@ -43,9 +44,11 @@ study_area_file <- file.path(
 
 model_dir <- file.path(project_dir, "models")
 prediction_dir <- file.path(project_dir, "predictions")
+results_dir <- file.path(project_dir, "results")
 
 dir.create(model_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(prediction_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 
 # -----------------------------
 # 3. ENVIRONMENTAL PREDICTORS
@@ -63,8 +66,6 @@ stopifnot(identical(names(env), expected_layers))
 # 4. OCCURRENCE DATA
 # -----------------------------
 
-occ_file <- "D:/Tushar/Research_Papers/Animal_Corridor_Pandu_da/Species/Book1.csv"
-
 occ <- read.csv(
   occ_file,
   stringsAsFactors = FALSE
@@ -72,12 +73,10 @@ occ <- read.csv(
 
 stopifnot(all(c("Animal", "Lat", "Long") %in% names(occ)))
 
-occ <- occ[
-  complete.cases(occ[, c("Long", "Lat")]),
-]
+occ <- occ[complete.cases(occ[, c("Long", "Lat")]), ]
+
 # Book1.csv contains projected coordinates:
 # Long = X and Lat = Y, despite the column names.
-occ <- occ[complete.cases(occ[, c("Long", "Lat")]), ]
 
 # Create point vector from X/Y coordinates
 occ_vect <- terra::vect(
@@ -100,7 +99,7 @@ occ_vect <- occ_vect[valid, ]
 occ_cells <- occ_cells[valid]
 
 keep <- !duplicated(occ_cells)
-cattle_vect_cell <- occ_vect[keep, ]
+prey_vect_cell <- occ_vect[keep, ]
 presence_cells <- occ_cells[keep]
 
 cat("Original records:", nrow(occ), "\n")
@@ -109,7 +108,7 @@ cat("Unique modelling cells:", length(presence_cells), "\n")
 # -----------------------------
 # 6. PRESENCE ENVIRONMENTAL VALUES
 # -----------------------------
-presence_env <- terra::extract(env, cattle_vect_cell)
+presence_env <- terra::extract(env,prey_vect_cell)
 presence_df <- presence_env[, -1]
 
 if (anyNA(presence_df)) {
@@ -167,7 +166,120 @@ cat("\nPresence/background counts:\n")
 print(table(maxent_data$presence))
 
 # -----------------------------
-# 9. FINAL MAXNET MODEL
+# 9. RANDOM 70/30 VALIDATION
+# -----------------------------
+
+set.seed(123)
+
+presence_id <- sample(
+  seq_len(nrow(presence_df)),
+  size = round(0.70 * nrow(presence_df))
+)
+
+background_id <- sample(
+  seq_len(nrow(background_df)),
+  size = round(0.70 * nrow(background_df))
+)
+
+train_random <- rbind(
+  presence_df[presence_id, ],
+  background_df[background_id, ]
+)
+
+test_random <- rbind(
+  presence_df[-presence_id, ],
+  background_df[-background_id, ]
+)
+
+x_train <- train_random[, setdiff(names(train_random), "presence")]
+y_train <- train_random$presence
+
+x_test <- test_random[, setdiff(names(test_random), "presence")]
+y_test <- test_random$presence
+
+x_train$LULC <- factor(
+  x_train$LULC,
+  levels = lulc_levels
+)
+
+x_test$LULC <- factor(
+  x_test$LULC,
+  levels = lulc_levels
+)
+
+set.seed(123)
+
+mx_model_eval <- maxnet(
+  p = y_train,
+  data = x_train,
+  f = maxnet.formula(
+    p = y_train,
+    data = x_train,
+    classes = "lqph"
+  ),
+  regmult = 1
+)
+
+random_pred <- as.numeric(
+  predict(
+    mx_model_eval,
+    x_test,
+    type = "cloglog"
+  )
+)
+
+random_auc <- as.numeric(
+  auc(
+    roc(
+      y_test,
+      random_pred,
+      quiet = TRUE
+    )
+  )
+)
+
+# Find threshold maximizing TSS
+
+thresholds <- seq(0, 1, by = 0.001)
+
+tss_values <- sapply(
+  thresholds,
+  function(threshold) {
+    
+    predicted_class <- ifelse(
+      random_pred >= threshold,
+      1,
+      0
+    )
+    
+    TP <- sum(predicted_class == 1 & y_test == 1)
+    TN <- sum(predicted_class == 0 & y_test == 0)
+    FP <- sum(predicted_class == 1 & y_test == 0)
+    FN <- sum(predicted_class == 0 & y_test == 1)
+    
+    sensitivity <- TP / (TP + FN)
+    specificity <- TN / (TN + FP)
+    
+    sensitivity + specificity - 1
+  }
+)
+
+best_random <- which.max(tss_values)
+
+random_threshold <- thresholds[best_random]
+random_tss <- tss_values[best_random]
+
+cat("\nRandom validation AUC:",
+    round(random_auc, 4), "\n")
+
+cat("Random validation TSS:",
+    round(random_tss, 4), "\n")
+
+cat("Random validation threshold:",
+    random_threshold, "\n")
+
+# -----------------------------
+# 10. FINAL MAXNET MODEL
 # -----------------------------
 x_final <- maxent_data[, setdiff(names(maxent_data), "presence")]
 y_final <- maxent_data$presence
@@ -190,11 +302,11 @@ saveRDS(
 )
 
 # -----------------------------
-# 10. FIVE-FOLD SPATIAL VALIDATION
+# 11. FIVE-FOLD SPATIAL VALIDATION
 # -----------------------------
 set.seed(123)
 
-presence_xy <- crds(cattle_vect_cell)
+presence_xy <- crds(prey_vect_cell)
 background_xy <- crds(background_vect)
 
 # Cluster presence locations into five spatial groups.
@@ -250,6 +362,37 @@ for (fold_id in 1:5) {
   pred <- as.numeric(predict(mx_fold, x_test, type = "cloglog"))
 
   auc_value <- as.numeric(auc(roc(y_test, pred, quiet = TRUE)))
+  
+  # Calculate TSS across thresholds
+  
+  thresholds <- seq(0, 1, by = 0.001)
+  
+  tss_values <- sapply(
+    thresholds,
+    function(threshold) {
+      
+      predicted_class <- ifelse(
+        pred >= threshold,
+        1,
+        0
+      )
+      
+      TP <- sum(predicted_class == 1 & y_test == 1)
+      TN <- sum(predicted_class == 0 & y_test == 0)
+      FP <- sum(predicted_class == 1 & y_test == 0)
+      FN <- sum(predicted_class == 0 & y_test == 1)
+      
+      sensitivity <- TP / (TP + FN)
+      specificity <- TN / (TN + FP)
+      
+      sensitivity + specificity - 1
+    }
+  )
+  
+  best_tss <- which.max(tss_values)
+  
+  fold_threshold <- thresholds[best_tss]
+  fold_tss <- tss_values[best_tss]
 
   spatial_results <- rbind(
     spatial_results,
@@ -257,7 +400,9 @@ for (fold_id in 1:5) {
       fold = fold_id,
       test_presence = sum(y_test == 1),
       test_background = sum(y_test == 0),
-      AUC = auc_value
+      AUC = auc_value,
+      threshold = fold_threshold,
+      TSS = fold_tss
     )
   )
 
@@ -271,12 +416,83 @@ print(spatial_results)
 
 mean_spatial_auc <- mean(spatial_results$AUC)
 sd_spatial_auc <- sd(spatial_results$AUC)
+mean_spatial_tss <- mean(spatial_results$TSS)
+sd_spatial_tss <- sd(spatial_results$TSS)
 
 cat("\nMean spatial AUC:", round(mean_spatial_auc, 4), "\n")
 cat("SD spatial AUC:", round(sd_spatial_auc, 4), "\n")
+cat("Mean spatial TSS:", round(mean_spatial_tss, 4), "\n")
+cat("SD spatial TSS:", round(sd_spatial_tss, 4), "\n")
+
+write.csv(
+  spatial_results[, c(
+    "fold",
+    "test_presence",
+    "test_background",
+    "AUC"
+  )],
+  file.path(
+    results_dir,
+    "spatial_validation_AUC.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  spatial_results[, c(
+    "fold",
+    "test_presence",
+    "test_background",
+    "threshold",
+    "TSS"
+  )],
+  file.path(
+    results_dir,
+    "spatial_validation_TSS.csv"
+  ),
+  row.names = FALSE
+)
 
 # -----------------------------
-# 11. CONTINUOUS SUITABILITY MAP
+# 12. SAVE MODEL SUMMARY
+# -----------------------------
+
+model_summary <- data.frame(
+  Metric = c(
+    "Presence cells",
+    "Background cells",
+    "Number of predictors",
+    "Random test AUC",
+    "Random test TSS",
+    "Spatial mean AUC",
+    "Spatial SD AUC",
+    "Spatial mean TSS",
+    "Spatial SD TSS"
+  ),
+  Value = c(
+    length(presence_cells),
+    n_background,
+    nlyr(env),
+    random_auc,
+    random_tss,
+    mean_spatial_auc,
+    sd_spatial_auc,
+    mean_spatial_tss,
+    sd_spatial_tss
+  )
+)
+
+write.csv(
+  model_summary,
+  file.path(
+    results_dir,
+    "model_summary.csv"
+  ),
+  row.names = FALSE
+)
+
+# -----------------------------
+# 13. CONTINUOUS SUITABILITY MAP
 # -----------------------------
 prey_suitability <- terra::predict(
   env,
@@ -301,18 +517,37 @@ writeRaster(
 )
 
 # -----------------------------
-# 12. OUTPUT SUMMARY
+# 14. OUTPUT SUMMARY
 # -----------------------------
+
 cat("\n============================================\n")
 cat("TIGER PREY MAXNET WORKFLOW COMPLETE\n")
 cat("============================================\n")
+
 cat("Presence cells:", length(presence_cells), "\n")
 cat("Background cells:", n_background, "\n")
 cat("Predictors:", nlyr(env), "\n")
-cat("Spatial AUC:", round(mean_spatial_auc, 4),
-    "+/-", round(sd_spatial_auc, 4), "\n")
-cat("Suitability raster:\n", prey_suitability_file, "\n")
-cat("Final model:\n",
-    file.path(model_dir, "Tiger_Prey_Maxnet_final.rds"), "\n")
-cat("============================================\n")
 
+cat("\nRandom validation:\n")
+cat("AUC:", round(random_auc, 4), "\n")
+cat("TSS:", round(random_tss, 4), "\n")
+
+cat("\nSpatial validation:\n")
+cat("Mean AUC:", round(mean_spatial_auc, 4), "\n")
+cat("SD AUC:", round(sd_spatial_auc, 4), "\n")
+cat("Mean TSS:", round(mean_spatial_tss, 4), "\n")
+cat("SD TSS:", round(sd_spatial_tss, 4), "\n")
+
+cat("\nSuitability raster:\n")
+cat(prey_suitability_file, "\n")
+
+cat("\nFinal model:\n")
+cat(
+  file.path(
+    model_dir,
+    "Tiger_Prey_Maxnet_final.rds"
+  ),
+  "\n"
+)
+
+cat("============================================\n")
