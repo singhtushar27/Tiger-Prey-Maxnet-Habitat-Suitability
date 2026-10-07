@@ -1,0 +1,10 @@
+"Metric","Value"
+"Presence cells",185
+"Background cells",10000
+"Number of predictors",14
+"Random test AUC",0.9948
+"Random test TSS",0.973
+"Spatial mean AUC",0.970278420058809
+"Spatial SD AUC",0.0184195614393397
+"Spatial mean TSS",0.904355078613757
+"Spatial SD TSS",0.0576897125682459
